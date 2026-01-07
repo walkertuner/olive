@@ -7,7 +7,7 @@ class OLIVE(nn.Module):
     Output:
         octave_logits (B, num_octaves)
         pitch_logits  (B, num_pitch_classes)
-        partials      (B,)
+        partials      (B, num_partials)
         voicing       (B, voicing_dim)
         h             (num_layers * num_dirs, B, rnn_hidden)
     """
@@ -70,14 +70,14 @@ class OLIVE(nn.Module):
             nn.Linear(128, num_pitch_classes),
         )
 
-        # ---------- Latent tuning head ----------
+        # ---------- Latent voicing head ----------
         self.voicing_head = nn.Sequential(
-            nn.Linear(rnn_feat_dim, 64),
+            nn.Linear(rnn_feat_dim + num_octaves + num_pitch_classes, 64),
             nn.ReLU(inplace=True),
             nn.Linear(64, voicing_dim),
         )
 
-        # ---------- Partial decoder (training supervision only) ----------
+        # ---------- Partial decoder ----------
         self.partial_head = nn.Linear(voicing_dim, num_partials)
 
     # ------------------------------------------------------------------
@@ -120,13 +120,14 @@ class OLIVE(nn.Module):
 
         pitch_in = torch.cat([ctx, octave_probs], dim=-1)
         pitch_logits = self.pitch_head(pitch_in)
+        pitch_probs = nn.functional.softmax(pitch_logits, dim=-1)
 
-        # ----- Latent tuning -----
-        voicing = self.voicing_head(ctx)
+        # ----- Latent voicing -----
+        voicing_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
+        voicing = self.voicing_head(voicing_in)
 
         # ----- All partials -----
         partials = self.partial_head(voicing)
-        # shape: (B, MAX_PARTIALS)
 
         return octave_logits, pitch_logits, partials, voicing, h
 
@@ -153,19 +154,28 @@ class OLIVE(nn.Module):
         B, Freq = frame.shape
         assert Freq == self.freq_bins, f"Expected {self.freq_bins}, got {Freq}"
 
-        emb = self._encode_frames(frame)
-        emb = emb.unsqueeze(1)
+        # CNN
+        emb = self._encode_frames(frame)   # (B, cnn_out)
+        emb = emb.unsqueeze(1)             # (B, 1, cnn_out)
 
+        # GRU
         rnn_out, h_next = self.rnn(emb, h_prev)
-        ctx = rnn_out[:, -1, :]
+        ctx = rnn_out[:, -1, :]             # (B, rnn_feat_dim)
 
+        # ----- Note classification -----
         octave_logits = self.octave_head(ctx)
         octave_probs = nn.functional.softmax(octave_logits, dim=-1)
 
         pitch_in = torch.cat([ctx, octave_probs], dim=-1)
         pitch_logits = self.pitch_head(pitch_in)
+        pitch_probs = nn.functional.softmax(pitch_logits, dim=-1)
 
-        voicing = self.tuning_head(ctx)
+        # ----- Latent voicing -----
+        voicing_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
+        voicing = self.voicing_head(voicing_in)
+
+        # ----- Partials -----
         partials = self.partial_head(voicing)
 
         return octave_logits, pitch_logits, partials, voicing, h_next
+
