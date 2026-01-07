@@ -90,7 +90,11 @@ def main():
         # ----------------------------------------------------
         n_phases = len(args.epochs)
         for phase, n_epochs in enumerate(args.epochs):
-            w_part = (phase / n_phases) * args.partials_weight
+            if n_phases == 1:
+                w_part = args.partials_weight
+            else:
+                w_part = (phase / (n_phases - 1)) * args.partials_weight
+                
             for epoch in range(n_epochs):
                 model.train()
                 total_loss = 0.0
