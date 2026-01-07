@@ -89,13 +89,16 @@ def main():
         # Training loop
         # ----------------------------------------------------
         n_phases = len(args.epochs)
-        for phase, n_epochs in enumerate(args.epochs):
+        n_epochs = sum(args.epochs)
+        for phase, epochs in enumerate(args.epochs):
+            epochs_before = sum(args.epochs[:phase])
             if n_phases == 1:
                 w_part = args.partials_weight
             else:
                 w_part = (phase / (n_phases - 1)) * args.partials_weight
 
-            for epoch in range(n_epochs):
+            for i in range(epochs):
+                epoch = epochs_before + i
                 model.train()
                 total_loss = 0.0
 
@@ -214,13 +217,15 @@ def main():
 
                 print(
                     f"Phase {phase+1}/{n_phases} | "
-                    f"Epoch {epoch+1}/{args.epochs[phase]} | "
+                    f"Epoch {epoch+1}/{n_epochs} | "
                     f"Loss {train_loss_epoch:.4f} | "
                     f"Octave {100*octave_acc:.2f}% | "
                     f"Pitch {100*pc_acc:.2f}% | "
                     f"Note {100*full_acc:.2f}% | "
                     f"Partials {total_mae:.3f}"
                 )
+
+                epoch = epoch + 1
 
 
         writer.close()
