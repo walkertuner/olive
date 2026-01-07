@@ -8,7 +8,6 @@ class OLIVE(nn.Module):
         octave_logits (B, num_octaves)
         pitch_logits  (B, num_pitch_classes)
         partials      (B, num_partials)
-        voicing       (B, voicing_dim)
         h             (num_layers * num_dirs, B, rnn_hidden)
     """
 
@@ -129,7 +128,7 @@ class OLIVE(nn.Module):
         # ----- All partials -----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials, voicing, h
+        return octave_logits, pitch_logits, partials, h
 
     # ------------------------------------------------------------------
 
@@ -177,5 +176,5 @@ class OLIVE(nn.Module):
         # ----- Partials -----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials, voicing, h_next
+        return octave_logits, pitch_logits, partials, h_next
 

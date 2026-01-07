@@ -94,12 +94,12 @@ def main():
                 w_part = args.partials_weight
             else:
                 w_part = (phase / (n_phases - 1)) * args.partials_weight
-                
+
             for epoch in range(n_epochs):
                 model.train()
                 total_loss = 0.0
 
-                for X_batch, octave_target, pitch_target, partials_target, partials_mask, stream_index in train_loader:
+                for X_batch, octave_target, pitch_target, partials_target, partials_mask, _ in train_loader:
                     X_batch = X_batch.to(args.device)
                     octave_target = octave_target.to(args.device)
                     pitch_target = pitch_target.to(args.device)
@@ -108,7 +108,7 @@ def main():
 
                     optimizer.zero_grad()
 
-                    octave_logits, pitch_logits, partials_pred, voicing, _ = model(X_batch)
+                    octave_logits, pitch_logits, partials_pred, _ = model(X_batch)
 
                     loss = (ce_loss(octave_logits, octave_target) + ce_loss(pitch_logits, pitch_target))
 
@@ -143,14 +143,14 @@ def main():
                 count_per_partial = torch.zeros(P, device=args.device)
 
                 with torch.no_grad():
-                    for X_batch, octave_target, pitch_target, partials_target, partials_mask, stream_index in test_loader:
+                    for X_batch, octave_target, pitch_target, partials_target, partials_mask, _ in test_loader:
                         X_batch = X_batch.to(args.device)
                         octave_target = octave_target.to(args.device)
                         pitch_target = pitch_target.to(args.device)
                         partials_target = partials_target.to(args.device)
                         partials_mask = partials_mask.to(args.device)
 
-                        octave_logits, pitch_logits, partials_pred, _, _ = model(X_batch)
+                        octave_logits, pitch_logits, partials_pred, _ = model(X_batch)
 
                         pred_oct = octave_logits.argmax(dim=1)
                         pred_pc  = pitch_logits.argmax(dim=1)
