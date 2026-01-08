@@ -75,7 +75,7 @@ class OLIVE(nn.Module):
         self.instrument_emb = nn.Embedding(num_instruments, voicing_dim)
 
         self.voicing_instr_head = nn.Sequential(
-            nn.Linear(voicing_dim, 128),
+            nn.Linear(rnn_feat_dim + voicing_dim, 128),
             nn.ReLU(inplace=True),
             nn.Linear(128, voicing_dim),
         )
@@ -130,7 +130,8 @@ class OLIVE(nn.Module):
 
         # ----- Latent voicing -----
         instr_emb = self.instrument_emb(instrument_id)
-        voicing_instr = self.voicing_instr_head(instr_emb)
+        instr_in = torch.cat([instr_emb, ctx.detach()], dim=-1)
+        voicing_instr = self.voicing_instr_head(instr_in)
 
         note_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
         voicing_note = self.voicing_note_head(note_in)
@@ -183,7 +184,8 @@ class OLIVE(nn.Module):
 
         # ----- Latent voicing -----
         instr_emb = self.instrument_emb(instrument_id)
-        voicing_instr = self.voicing_instr_head(instr_emb)
+        instr_in = torch.cat([instr_emb, ctx.detach()], dim=-1)
+        voicing_instr = self.voicing_instr_head(instr_in)
 
         note_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
         voicing_note = self.voicing_note_head(note_in)
