@@ -13,11 +13,12 @@ class OLIVE(nn.Module):
 
     def __init__(
         self,
+        num_instruments,
         freq_bins=108,
         cnn_out=64,
         rnn_hidden=128,
         num_octaves=8,
-        num_pitch_classes=12,
+        num_pitches=12,
         bidirectional=False,
         rnn_layers=1,
         dropout=0.0,
@@ -26,9 +27,10 @@ class OLIVE(nn.Module):
     ):
         super().__init__()
 
+        self.num_instruments = num_instruments
         self.freq_bins = freq_bins
         self.num_octaves = num_octaves
-        self.num_pitch_classes = num_pitch_classes
+        self.num_pitches = num_pitches
         self.bidirectional = bidirectional
         self.rnn_hidden = rnn_hidden
         self.rnn_layers = rnn_layers
@@ -66,14 +68,22 @@ class OLIVE(nn.Module):
         self.pitch_head = nn.Sequential(
             nn.Linear(rnn_feat_dim + num_octaves, 128),
             nn.ReLU(inplace=True),
-            nn.Linear(128, num_pitch_classes),
+            nn.Linear(128, num_pitches),
         )
 
-        # ---------- Latent voicing head ----------
-        self.voicing_head = nn.Sequential(
-            nn.Linear(rnn_feat_dim + num_octaves + num_pitch_classes, 64),
+        # ---------- Latent voicing heads ----------
+        self.instrument_emb = nn.Embedding(num_instruments, voicing_dim)
+
+        self.voicing_instr_head = nn.Sequential(
+            nn.Linear(voicing_dim, 128),
             nn.ReLU(inplace=True),
-            nn.Linear(64, voicing_dim),
+            nn.Linear(128, voicing_dim),
+        )
+
+        self.voicing_note_head = nn.Sequential(
+            nn.Linear(rnn_feat_dim + num_octaves + num_pitches, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, voicing_dim),
         )
 
         # ---------- Partial decoder ----------
@@ -93,7 +103,7 @@ class OLIVE(nn.Module):
 
     # ------------------------------------------------------------------
 
-    def forward(self, x, h0=None, use_last=True):
+    def forward(self, x, instrument_id):
         """
         x: (B, T, Freq)
         """
@@ -106,12 +116,9 @@ class OLIVE(nn.Module):
         emb = emb_bt.view(B, T, -1)
 
         # GRU
-        rnn_out, h = self.rnn(emb, h0)
+        rnn_out, h = self.rnn(emb)
 
-        if use_last:
-            ctx = rnn_out[:, -1, :]
-        else:
-            ctx = rnn_out.mean(dim=1)
+        ctx = rnn_out[:, -1, :]
 
         # ----- Note classification -----
         octave_logits = self.octave_head(ctx)
@@ -122,13 +129,18 @@ class OLIVE(nn.Module):
         pitch_probs = nn.functional.softmax(pitch_logits, dim=-1)
 
         # ----- Latent voicing -----
-        voicing_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
-        voicing = self.voicing_head(voicing_in)
+        instr_emb = self.instrument_emb(instrument_id)
+        voicing_instr = self.voicing_instr_head(instr_emb)
+
+        note_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
+        voicing_note = self.voicing_note_head(note_in)
+
+        voicing = voicing_instr + voicing_note
 
         # ----- All partials -----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials, h
+        return octave_logits, pitch_logits, partials
 
     # ------------------------------------------------------------------
 
@@ -145,7 +157,7 @@ class OLIVE(nn.Module):
 
     # ------------------------------------------------------------------
 
-    def forward_step(self, frame, h_prev=None):
+    def forward_step(self, frame, instrument_id):
         """
         Streaming single-frame step.
         frame: (B, Freq)
@@ -158,7 +170,7 @@ class OLIVE(nn.Module):
         emb = emb.unsqueeze(1)             # (B, 1, cnn_out)
 
         # GRU
-        rnn_out, h_next = self.rnn(emb, h_prev)
+        rnn_out, h = self.rnn(emb)
         ctx = rnn_out[:, -1, :]             # (B, rnn_feat_dim)
 
         # ----- Note classification -----
@@ -170,11 +182,16 @@ class OLIVE(nn.Module):
         pitch_probs = nn.functional.softmax(pitch_logits, dim=-1)
 
         # ----- Latent voicing -----
-        voicing_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
-        voicing = self.voicing_head(voicing_in)
+        instr_emb = self.instrument_emb(instrument_id)
+        voicing_instr = self.voicing_instr_head(instr_emb)
+
+        note_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
+        voicing_note = self.voicing_note_head(note_in)
+
+        voicing = voicing_instr + voicing_note
 
         # ----- Partials -----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials, h_next
+        return octave_logits, pitch_logits, partials
 

@@ -52,7 +52,8 @@ def main():
 
     feature_data = olive.load_features(args)
 
-    stream_ids = sorted(set(seg.stream_id for seg in feature_data))
+    stream_ids = sorted(set(s.stream_id for s in feature_data))
+    num_instruments = max([s.instrument_id for s in feature_data]) + 1
 
     # --------------------------------------------------------
     # Cross-validation
@@ -68,13 +69,14 @@ def main():
         train_streams = {stream_ids[i] for i in train_idx}
         test_streams  = {stream_ids[i] for i in test_idx}
 
-        train_dataset = [seg for seg in feature_data if seg.stream_id in train_streams]
-        test_dataset  = [seg for seg in feature_data if seg.stream_id in test_streams]
+        train_dataset = [s for s in feature_data if s.stream_id in train_streams]
+        test_dataset  = [s for s in feature_data if s.stream_id in test_streams]
 
         train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
         test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size)
 
         model = olive.OLIVE(
+            num_instruments,
             freq_bins=args.num_octaves * 12,
             num_octaves=args.num_octaves,
             num_partials=args.num_partials
@@ -102,16 +104,17 @@ def main():
                 model.train()
                 total_loss = 0.0
 
-                for X_batch, octave_target, pitch_target, partials_target, partials_mask, _ in train_loader:
+                for X_batch, octave_target, pitch_target, partials_target, partials_mask, instrument_id, _ in train_loader:
                     X_batch = X_batch.to(args.device)
                     octave_target = octave_target.to(args.device)
                     pitch_target = pitch_target.to(args.device)
                     partials_target = partials_target.to(args.device)
                     partials_mask = partials_mask.to(args.device)
+                    instrument_id = instrument_id.to(args.device)
 
                     optimizer.zero_grad()
 
-                    octave_logits, pitch_logits, partials_pred, _ = model(X_batch)
+                    octave_logits, pitch_logits, partials_pred = model(X_batch, instrument_id)
 
                     loss = (ce_loss(octave_logits, octave_target) + ce_loss(pitch_logits, pitch_target))
 
@@ -146,14 +149,15 @@ def main():
                 count_per_partial = torch.zeros(P, device=args.device)
 
                 with torch.no_grad():
-                    for X_batch, octave_target, pitch_target, partials_target, partials_mask, _ in test_loader:
+                    for X_batch, octave_target, pitch_target, partials_target, partials_mask, instrument_id, _ in test_loader:
                         X_batch = X_batch.to(args.device)
                         octave_target = octave_target.to(args.device)
                         pitch_target = pitch_target.to(args.device)
                         partials_target = partials_target.to(args.device)
                         partials_mask = partials_mask.to(args.device)
+                        instrument_id = instrument_id.to(args.device)
 
-                        octave_logits, pitch_logits, partials_pred, _ = model(X_batch)
+                        octave_logits, pitch_logits, partials_pred = model(X_batch, instrument_id)
 
                         pred_oct = octave_logits.argmax(dim=1)
                         pred_pc  = pitch_logits.argmax(dim=1)

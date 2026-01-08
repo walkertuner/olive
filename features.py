@@ -18,6 +18,7 @@ class Sample(typing.NamedTuple):
     pitch: torch.Tensor
     partials: torch.Tensor
     mask: torch.Tensor
+    instrument_id: int
     stream_id: int
 
 class RealTimeNoiseFloor:
@@ -99,26 +100,35 @@ def build_feature_data(args):
 
     print("Extracting features...")
     
+    instruments = {}
     feature_data = []
-    k = 0
+    num_samples = 0
 
     for data in metadata:
+        # map instrument indicies
+        if data["instrument"] not in instruments:
+            instruments[data["instrument"]] = len(instruments)
+
+        instr_index = instruments[data["instrument"]]
+
         for i, sample_data in enumerate(data["samples"], start=1):
             if "file" not in sample_data:
                 continue
 
+            sample_index = num_samples + i
+
             print(
-                f"[{k + i}/{total_samples}] "
+                f"[{sample_index}/{total_samples}] "
                 f"Processing {os.path.basename(sample_data['file'])}",
                 end="\r",
                 flush=True,
             )
 
-            sample = extract_features(sample_data, k + i, cqt, noise_floor, args)
+            samples = extract_features(sample_data, instr_index, sample_index, cqt, noise_floor, args)
             
-            feature_data.extend(sample)
+            feature_data.extend(samples)
 
-        k += len(data["samples"])
+        num_samples += len(data["samples"])
 
     print("\nDone.")
     return feature_data
@@ -149,7 +159,7 @@ def load_metadata_file(json_path):
 
     return data
 
-def extract_features(sample_data, stream_index, cqt, noise_floor, args):
+def extract_features(sample_data, instr_index, stream_index, cqt, noise_floor, args):
     path = sample_data["file"]
     waveform, file_sr = torchaudio.load(path)
     
@@ -208,7 +218,7 @@ def extract_features(sample_data, stream_index, cqt, noise_floor, args):
 
         partials_target = torch.zeros(args.num_partials, dtype=torch.float32)
         partials_mask = torch.zeros(args.num_partials, dtype=torch.bool)
-        for k, v in enumerate(sample_data["partials"]):
+        for k, v in enumerate(sample_data["partials_ET"]):
             if k >= args.num_partials:
                 break
             if v is None:
@@ -216,7 +226,13 @@ def extract_features(sample_data, stream_index, cqt, noise_floor, args):
             partials_target[k] = v
             partials_mask[k] = True
 
-        samples.append(Sample(sample_features.cpu(), octave, pitch_class, partials_target, partials_mask, stream_index))
+        samples.append(Sample(sample_features.cpu(),
+                              octave, pitch_class,
+                              partials_target,
+                              partials_mask,
+                              instr_index,
+                              stream_index)
+                      )
         
         i += 1
         if i >= T:

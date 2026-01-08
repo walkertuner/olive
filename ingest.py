@@ -20,15 +20,17 @@ def parse_paz(filename):
     if os.path.exists(paz_filename):
         paz = rct.load_paz(paz_filename)
         for i in range(88):
-            partial_data = paz["offsets_harmonic"]["by_note"][i+10]
+            partials = paz["offsets_harmonic"]["by_note"][i+10]
+            partials_ET = paz["offsets_ET"][1]["by_note"][i+10]
             amplitude_data = paz["amplitude"]["by_note"][i+10]
             pcm_data = paz["pcm"][i]
 
             metadata[i] = {"note": i,
                            "partials": [],
-                           "amplitudes": [],
+            #               "amplitudes": [],
                            "pcm": []}
-            metadata[i]["partials"] =  [None if v == 0.0 else v for v in partial_data["values"]]
+            metadata[i]["partials"] =  [None if v == 0.0 else v for v in partials["values"]]
+            metadata[i]["partials_ET"] =  [None if v == 0.0 else v for v in partials_ET["values"]]
             metadata[i]["amplitudes"] = [None if v == 0.0 else v for v in amplitude_data["values"]]
             metadata[i]["pcm"] = pcm_data
 
