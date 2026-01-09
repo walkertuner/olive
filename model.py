@@ -73,7 +73,6 @@ class OLIVE(nn.Module):
         # ---------- Latent voicing heads ----------
         self.instr_prior = nn.Parameter(torch.zeros(voicing_dim))
         self.instr_embedding = nn.Embedding(num_instr, voicing_dim)
-
         self.instr_update = nn.Linear(rnn_hidden, voicing_dim)
 
         self.voicing_instr_head = self._make_mlp(
@@ -156,14 +155,11 @@ class OLIVE(nn.Module):
         return state
 
     
-    def update_instr_state(self, instr_state, instr_evidence):
+    def update_instr_state(self, instr_state, delta):
         """
         Update instr_state with accumulated evidence
         """
-        instr_state_next = (
-            (1 - self.alpha) * instr_state
-            + self.alpha * instr_evidence
-        )
+        instr_state_next = (1 - self.alpha) * instr_state + self.alpha * delta
         return instr_state_next.detach()
 
 
@@ -210,21 +206,16 @@ class OLIVE(nn.Module):
         # ----- Latent voicing -----
         if instr_state is None:
             instr_state = self.init_instr_state(B, sequence.device)
-
-        instr_evidence = torch.zeros_like(instr_state)
-        for t in range(T):
-            ctx = rnn_out[:, t, :]
-            instr_evidence += self.instr_update(ctx)
             
         instr_in = torch.cat([instr_state, ctx.detach()], dim=-1)
         voicing_instr = self.voicing_instr_head(instr_in)
-
-        instr_state = self.update_instr_state(instr_state, instr_evidence)
 
         note_in = torch.cat([ctx, voicing_instr, octave_probs, pitch_probs], dim=-1)
         voicing_note = self.voicing_note_head(note_in)
 
         voicing = voicing_instr + voicing_note
+
+        instr_state = self.update_instr_state(instr_state, self.instr_update(ctx))
 
         # ----- All partials -----
         partials = self.partial_head(voicing)
@@ -233,7 +224,7 @@ class OLIVE(nn.Module):
 
     # ------------------------------------------------------------------
 
-    def forward_frame(self, frame, instr_state=None, instr_evidence=None, h=None):
+    def forward_frame(self, frame, instr_state=None, h=None):
         """
          Process one frame (online / streaming)
 
@@ -245,6 +236,7 @@ class OLIVE(nn.Module):
             octave_logits
             pitch_logits
             partials
+            instr_delta
             h_next
         """
         B, Freq = frame.shape
@@ -273,11 +265,6 @@ class OLIVE(nn.Module):
         # ---- Latent voicing ----
         if instr_state is None:
             instr_state = self.init_instr_state(B, frame.device)
-
-        if instr_evidence is None:
-            instr_evidence = torch.zeros(B, self.voicing_dim, device=frame.device)
-
-        instr_evidence += self.instr_update(ctx)
         
         instr_in = torch.cat([instr_state, ctx.detach()], dim=-1)
         voicing_instr = self.voicing_instr_head(instr_in)
@@ -290,6 +277,6 @@ class OLIVE(nn.Module):
         # ---- Partials ----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials, instr_evidence, h_next
+        return octave_logits, pitch_logits, partials, self.instr_update(ctx), h_next
 
 
