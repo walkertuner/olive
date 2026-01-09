@@ -1,4 +1,5 @@
 import argparse
+import collections
 import io
 import os
 import sklearn
@@ -35,6 +36,7 @@ def parse_args():
     parser.add_argument("--folds", type=int, default=10)
     parser.add_argument("--learn-rate", type=float, default=1e-3)
     parser.add_argument("--partials-weight", type=float, default=1.0)
+    parser.add_argument("--p_unknown", type=float, default=0.25)
     parser.add_argument("--device", type=str, default=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     
     parser.add_argument("--num-octaves", type=int, default=8)
@@ -53,7 +55,7 @@ def main():
     feature_data = olive.load_features(args)
 
     stream_ids = sorted(set(s.stream_id for s in feature_data))
-    num_instruments = max([s.instrument_id for s in feature_data]) + 1
+    num_instr = max([s.instr_id for s in feature_data]) + 1
 
     # --------------------------------------------------------
     # Cross-validation
@@ -76,7 +78,7 @@ def main():
         test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size)
 
         model = olive.OLIVE(
-            num_instruments,
+            num_instr,
             freq_bins=args.num_octaves * 12,
             num_octaves=args.num_octaves,
             num_partials=args.num_partials
@@ -103,18 +105,49 @@ def main():
                 epoch = epochs_before + i
                 model.train()
                 total_loss = 0.0
+                total_samples = 0.0
 
-                for X_batch, octave_target, pitch_target, partials_target, partials_mask, instrument_id, _ in train_loader:
+                instr_state_table = {}
+
+                for X_batch, octave_target, pitch_target, partials_target, partials_mask, instr_id, _ in train_loader:
                     X_batch = X_batch.to(args.device)
                     octave_target = octave_target.to(args.device)
                     pitch_target = pitch_target.to(args.device)
                     partials_target = partials_target.to(args.device)
                     partials_mask = partials_mask.to(args.device)
-                    instrument_id = instrument_id.to(args.device)
+                    instr_id = instr_id.to(args.device)
+
+                    states = []
+                    unknown = []
+                    for iid in instr_id.tolist():
+                        if iid not in instr_state_table:
+                            instr_state_table[iid] = model.init_instr_state(1, args.device, instr_id=iid)
+                        drop = (torch.rand(1).item() < args.p_unknown)
+                        if drop:
+                            states.append(model.init_instr_state(1, args.device, instr_id=None))
+                        else:
+                            states.append(instr_state_table[iid])
+                        unknown.append(drop)
+                        
+                    instr_state = torch.cat(states, dim=0)  # (B, voicing_dim)
 
                     optimizer.zero_grad()
 
-                    octave_logits, pitch_logits, partials_pred = model(X_batch, instrument_id)
+                    octave_logits, pitch_logits, partials_pred, instr_state_next = model(X_batch, instr_state)
+
+                    # 3. Aggregate updates per instrument
+                    accum = collections.defaultdict(list)
+                    for i, iid in enumerate(instr_id.tolist()):
+                        if not unknown[i]:
+                            accum[iid].append(instr_state_next[i:i+1])
+
+                    # 4. Reduce
+                    for iid, updates in accum.items():
+                        instr_state_table[iid] = torch.mean(
+                            torch.cat(updates, dim=0),
+                            dim=0,
+                            keepdim=True,
+                        ).detach()
 
                     loss = (ce_loss(octave_logits, octave_target) + ce_loss(pitch_logits, pitch_target))
 
@@ -129,7 +162,8 @@ def main():
                     loss.backward()
                     optimizer.step()
 
-                    total_loss += loss.item()
+                    total_loss += loss.item() * X_batch.size(0)
+                    total_samples += X_batch.size(0)
 
                 # ------------------------------------------------
                 # Evaluation
@@ -140,24 +174,24 @@ def main():
                 all_true = []
                 all_pred = []
 
-                P = partials_target.shape[1]  # or MAX_PARTIALS
-
                 total_abs_error = 0.0
                 total_count = 0
 
-                abs_error_per_partial = torch.zeros(P, device=args.device)
-                count_per_partial = torch.zeros(P, device=args.device)
+                abs_error_per_partial = torch.zeros(model.num_partials, device=args.device)
+                count_per_partial = torch.zeros(model.num_partials, device=args.device)
 
                 with torch.no_grad():
-                    for X_batch, octave_target, pitch_target, partials_target, partials_mask, instrument_id, _ in test_loader:
+                    for X_batch, octave_target, pitch_target, partials_target, partials_mask, _, _ in test_loader:
                         X_batch = X_batch.to(args.device)
                         octave_target = octave_target.to(args.device)
                         pitch_target = pitch_target.to(args.device)
                         partials_target = partials_target.to(args.device)
                         partials_mask = partials_mask.to(args.device)
-                        instrument_id = instrument_id.to(args.device)
 
-                        octave_logits, pitch_logits, partials_pred = model(X_batch, instrument_id)
+                        B = X_batch.size(0)
+                        instr_state = model.init_instr_state(B, args.device, instr_id=None)  # UNKNOWN
+
+                        octave_logits, pitch_logits, partials_pred, _ = model(X_batch, instr_state)
 
                         pred_oct = octave_logits.argmax(dim=1)
                         pred_pc  = pitch_logits.argmax(dim=1)
@@ -190,7 +224,7 @@ def main():
 
                 # ---- pitch accuracy ----
 
-                train_loss_epoch = total_loss / len(train_loader)
+                train_loss_epoch = total_loss / total_samples
                 octave_acc = correct_oct / total
                 pc_acc = correct_pc / total
                 full_acc = correct_both / total
@@ -228,9 +262,6 @@ def main():
                     f"Note {100*full_acc:.2f}% | "
                     f"Partials {total_mae:.3f}"
                 )
-
-                epoch = epoch + 1
-
 
         writer.close()
 

@@ -18,7 +18,7 @@ class Sample(typing.NamedTuple):
     pitch: torch.Tensor
     partials: torch.Tensor
     mask: torch.Tensor
-    instrument_id: int
+    instr_id: int
     stream_id: int
 
 class RealTimeNoiseFloor:

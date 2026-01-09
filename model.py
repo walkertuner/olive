@@ -8,12 +8,13 @@ class OLIVE(nn.Module):
         octave_logits (B, num_octaves)
         pitch_logits  (B, num_pitch_classes)
         partials      (B, num_partials)
+        instr_state   (B, voicing_dim)
         h             (num_layers * num_dirs, B, rnn_hidden)
     """
 
     def __init__(
         self,
-        num_instruments,
+        num_instr,
         freq_bins=108,
         cnn_out=64,
         rnn_layers=1,
@@ -24,10 +25,11 @@ class OLIVE(nn.Module):
         num_octaves=8,
         num_pitches=12,
         num_partials=8,
+        alpha=0.01
     ):
         super().__init__()
 
-        self.num_instruments = num_instruments
+        self.num_instr = num_instr
         self.freq_bins = freq_bins
         self.rnn_layers = rnn_layers
         self.rnn_hidden = rnn_hidden
@@ -37,6 +39,7 @@ class OLIVE(nn.Module):
         self.num_octaves = num_octaves
         self.num_pitches = num_pitches
         self.num_partials = num_partials
+        self.alpha = alpha
 
         # ---------- Per-frame CNN ----------
         self.cnn = self._make_cnn_1d(
@@ -68,7 +71,10 @@ class OLIVE(nn.Module):
         )
 
         # ---------- Latent voicing heads ----------
-        self.instrument_emb = nn.Embedding(num_instruments, voicing_dim)
+        self.instr_prior = nn.Parameter(torch.zeros(voicing_dim))
+        self.instr_embedding = nn.Embedding(num_instr, voicing_dim)
+
+        self.instr_update = nn.Linear(rnn_hidden, voicing_dim)
 
         self.voicing_instr_head = self._make_mlp(
             in_dim=rnn_hidden + voicing_dim,
@@ -126,23 +132,70 @@ class OLIVE(nn.Module):
         x = self.cnn(x)              # (B*T, 32, cnn_out)
         x = x.mean(dim=1)            # (B*T, cnn_out)
         return x
+    
+    @torch.no_grad()
+    def init_hidden_state(self, B, device=None):
+        device = device or next(self.parameters()).device
+
+        return torch.zeros(self.rnn_layers, B, self.rnn_hidden, device=device)
+    
+    @torch.no_grad()
+    def init_instr_state(self, B, device=None, instr_id=None):
+        device = device or next(self.parameters()).device
+
+        if instr_id is None:
+            state = self.instr_prior.unsqueeze(0).expand(B, -1)
+        else:
+            if isinstance(instr_id, int):
+                idx = torch.tensor([instr_id], device=device)
+                state = self.instr_embedding(idx).expand(B, -1)
+            else:
+                # instr_id is (B,) tensor
+                state = self.instr_embedding(instr_id.to(device))
+
+        return state
+
+    
+    def update_instr_state(self, instr_state, instr_evidence):
+        """
+        Update instr_state with accumulated evidence
+        """
+        instr_state_next = (
+            (1 - self.alpha) * instr_state
+            + self.alpha * instr_evidence
+        )
+        return instr_state_next.detach()
+
+
+    def forward(self, x, instr_state):
+        return self.forward_sequence(x, instr_state)
 
     # ------------------------------------------------------------------
 
-    def forward(self, x, instrument_id):
+    def forward_sequence(self, sequence, instr_state=None):
         """
-        x: (B, T, Freq)
+        Process a complete sequence of frames (offline / batch)
+
+        sequence: (B, T, Freq)
+        instr_state: (B, voicing_dim)
+
+        returns:
+            octave_logits
+            pitch_logits
+            partials
+            instr_state
         """
-        B, T, Freq = x.shape
+        B, T, Freq = sequence.shape
         assert Freq == self.freq_bins, f"Expected {self.freq_bins}, got {Freq}"
 
         # Per-frame CNN
-        x_bt = x.reshape(B * T, Freq)
-        emb_bt = self._encode_frames(x_bt)
+        sequence_bt = sequence.reshape(B * T, Freq)
+        emb_bt = self._encode_frames(sequence_bt)
         emb = emb_bt.view(B, T, -1)
 
         # GRU
-        rnn_out, h = self.rnn(emb)
+        h = self.init_hidden_state(B, sequence.device)
+        rnn_out, h = self.rnn(emb, h)
 
         ctx = rnn_out[:, -1, :]
 
@@ -155,9 +208,18 @@ class OLIVE(nn.Module):
         pitch_probs = nn.functional.softmax(pitch_logits, dim=-1)
 
         # ----- Latent voicing -----
-        instr_emb = self.instrument_emb(instrument_id)
-        instr_in = torch.cat([instr_emb, ctx.detach()], dim=-1)
+        if instr_state is None:
+            instr_state = self.init_instr_state(B, sequence.device)
+
+        instr_evidence = torch.zeros_like(instr_state)
+        for t in range(T):
+            ctx = rnn_out[:, t, :]
+            instr_evidence += self.instr_update(ctx)
+            
+        instr_in = torch.cat([instr_state, ctx.detach()], dim=-1)
         voicing_instr = self.voicing_instr_head(instr_in)
+
+        instr_state = self.update_instr_state(instr_state, instr_evidence)
 
         note_in = torch.cat([ctx, voicing_instr, octave_probs, pitch_probs], dim=-1)
         voicing_note = self.voicing_note_head(note_in)
@@ -167,58 +229,67 @@ class OLIVE(nn.Module):
         # ----- All partials -----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials
+        return octave_logits, pitch_logits, partials, instr_state
 
     # ------------------------------------------------------------------
 
-    @torch.no_grad()
-    def init_hidden(self, batch_size, device=None):
-        device = device or next(self.parameters()).device
-        return torch.zeros(
-            self.rnn_layers,
-            batch_size,
-            self.rnn_hidden,
-            device=device,
-        )
-
-    # ------------------------------------------------------------------
-
-    def forward_step(self, frame, instrument_id):
+    def forward_frame(self, frame, instr_state=None, instr_evidence=None, h=None):
         """
-        Streaming single-frame step.
+         Process one frame (online / streaming)
+
         frame: (B, Freq)
+        instr_state: (B, voicing_dim)
+        h: (rnn_layers, B, rnn_hidden)
+
+        returns:
+            octave_logits
+            pitch_logits
+            partials
+            h_next
         """
         B, Freq = frame.shape
-        assert Freq == self.freq_bins, f"Expected {self.freq_bins}, got {Freq}"
+        assert Freq == self.freq_bins
 
-        # CNN
-        emb = self._encode_frames(frame)   # (B, cnn_out)
-        emb = emb.unsqueeze(1)             # (B, 1, cnn_out)
+        # ---- CNN ----
+        emb = self._encode_frames(frame)    # (B, cnn_out)
+        emb = emb.unsqueeze(1)              # (B, 1, cnn_out)
 
-        # GRU
-        rnn_out, h = self.rnn(emb)
-        ctx = rnn_out[:, -1, :]             # (B, rnn_feat_dim)
+        # ---- GRU (stateful!) ----
+        if h is None:
+            h = self.init_hidden_state(B, frame.device)
 
-        # ----- Note classification -----
+        rnn_out, h_next = self.rnn(emb, h)
+        h_next = h_next.detach()
+        ctx = rnn_out[:, -1, :]             # (B, rnn_hidden)
+
+        # ---- Note classification ----
         octave_logits = self.octave_head(ctx)
-        octave_probs = nn.functional.softmax(octave_logits, dim=-1)
+        octave_probs = torch.softmax(octave_logits, dim=-1)
 
         pitch_in = torch.cat([ctx, octave_probs], dim=-1)
         pitch_logits = self.pitch_head(pitch_in)
-        pitch_probs = nn.functional.softmax(pitch_logits, dim=-1)
+        pitch_probs = torch.softmax(pitch_logits, dim=-1)
 
-        # ----- Latent voicing -----
-        instr_emb = self.instrument_emb(instrument_id)
-        instr_in = torch.cat([instr_emb, ctx.detach()], dim=-1)
+        # ---- Latent voicing ----
+        if instr_state is None:
+            instr_state = self.init_instr_state(B, frame.device)
+
+        if instr_evidence is None:
+            instr_evidence = torch.zeros(B, self.voicing_dim, device=frame.device)
+
+        instr_evidence += self.instr_update(ctx)
+        
+        instr_in = torch.cat([instr_state, ctx.detach()], dim=-1)
         voicing_instr = self.voicing_instr_head(instr_in)
 
-        note_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
+        note_in = torch.cat([ctx, voicing_instr, octave_probs, pitch_probs],dim=-1)
         voicing_note = self.voicing_note_head(note_in)
 
         voicing = voicing_instr + voicing_note
 
-        # ----- Partials -----
+        # ---- Partials ----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials
+        return octave_logits, pitch_logits, partials, instr_evidence, h_next
+
 
