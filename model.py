@@ -16,34 +16,34 @@ class OLIVE(nn.Module):
         num_instruments,
         freq_bins=108,
         cnn_out=64,
+        rnn_layers=1,
         rnn_hidden=128,
+        mlp_layers=1,
+        mlp_hidden=128,
+        voicing_dim=32,
         num_octaves=8,
         num_pitches=12,
-        bidirectional=False,
-        rnn_layers=1,
-        dropout=0.0,
-        voicing_dim=32,
         num_partials=8,
     ):
         super().__init__()
 
         self.num_instruments = num_instruments
         self.freq_bins = freq_bins
+        self.rnn_layers = rnn_layers
+        self.rnn_hidden = rnn_hidden
+        self.mlp_layers=mlp_layers
+        self.mlp_hidden=mlp_hidden
+        self.voicing_dim = voicing_dim
         self.num_octaves = num_octaves
         self.num_pitches = num_pitches
-        self.bidirectional = bidirectional
-        self.rnn_hidden = rnn_hidden
-        self.rnn_layers = rnn_layers
-        self.voicing_dim = voicing_dim
         self.num_partials = num_partials
 
         # ---------- Per-frame CNN ----------
-        self.cnn = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=5, padding=2),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(16, 32, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool1d(cnn_out),
+        self.cnn = self._make_cnn_1d(
+            in_channels=1,
+            channels=[16, 32],
+            kernel_sizes=[5, 3],
+            out_dim=cnn_out,
         )
 
         # ---------- Temporal encoder ----------
@@ -51,45 +51,71 @@ class OLIVE(nn.Module):
             input_size=cnn_out,
             hidden_size=rnn_hidden,
             num_layers=rnn_layers,
-            bidirectional=bidirectional,
-            dropout=dropout if rnn_layers > 1 else 0.0,
-            batch_first=True,
+            bidirectional=False,
+            dropout=0.0,
+            batch_first=True
         )
-
-        rnn_feat_dim = rnn_hidden * (2 if bidirectional else 1)
 
         # ---------- Hierarchical note heads ----------
-        self.octave_head = nn.Sequential(
-            nn.Linear(rnn_feat_dim, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, num_octaves),
+        self.octave_head = self._make_mlp(
+            in_dim=rnn_hidden,
+            out_dim=num_octaves,
         )
 
-        self.pitch_head = nn.Sequential(
-            nn.Linear(rnn_feat_dim + num_octaves, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, num_pitches),
+        self.pitch_head = self._make_mlp(
+            in_dim=rnn_hidden + num_octaves,
+            out_dim=num_pitches,
         )
 
         # ---------- Latent voicing heads ----------
         self.instrument_emb = nn.Embedding(num_instruments, voicing_dim)
 
-        self.voicing_instr_head = nn.Sequential(
-            nn.Linear(rnn_feat_dim + voicing_dim, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, voicing_dim),
+        self.voicing_instr_head = self._make_mlp(
+            in_dim=rnn_hidden + voicing_dim,
+            out_dim=voicing_dim,
         )
 
-        self.voicing_note_head = nn.Sequential(
-            nn.Linear(rnn_feat_dim + num_octaves + num_pitches, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, voicing_dim),
+        self.voicing_note_head = self._make_mlp(
+            in_dim=rnn_hidden + voicing_dim + num_octaves + num_pitches,
+            out_dim=voicing_dim,
         )
 
         # ---------- Partial decoder ----------
         self.partial_head = nn.Linear(voicing_dim, num_partials)
 
     # ------------------------------------------------------------------
+
+    def _make_cnn_1d(self, in_channels: int, channels: list[int], kernel_sizes: list[int], out_dim: int):
+        assert len(channels) == len(kernel_sizes)
+
+        layers = []
+        c_in = in_channels
+
+        for c_out, k in zip(channels, kernel_sizes):
+            layers.append(
+                nn.Conv1d(
+                    c_in,
+                    c_out,
+                    kernel_size=k,
+                    padding=k // 2,   # preserve length
+                )
+            )
+            layers.append(nn.ReLU(inplace=True))
+            c_in = c_out
+
+        layers.append(nn.AdaptiveAvgPool1d(out_dim))
+        return nn.Sequential(*layers)
+
+    def _make_mlp(self, in_dim: int, out_dim: int):
+        layers = []
+        dims = [in_dim] + [self.mlp_hidden] * self.mlp_layers
+
+        for d_in, d_out in zip(dims[:-1], dims[1:]):
+            layers.append(nn.Linear(d_in, d_out))
+            layers.append(nn.ReLU(inplace=True))
+
+        layers.append(nn.Linear(dims[-1], out_dim))
+        return nn.Sequential(*layers)
 
     def _encode_frames(self, x_bt_freq):
         """
@@ -133,7 +159,7 @@ class OLIVE(nn.Module):
         instr_in = torch.cat([instr_emb, ctx.detach()], dim=-1)
         voicing_instr = self.voicing_instr_head(instr_in)
 
-        note_in = torch.cat([ctx, octave_probs, pitch_probs], dim=-1)
+        note_in = torch.cat([ctx, voicing_instr, octave_probs, pitch_probs], dim=-1)
         voicing_note = self.voicing_note_head(note_in)
 
         voicing = voicing_instr + voicing_note
@@ -148,9 +174,8 @@ class OLIVE(nn.Module):
     @torch.no_grad()
     def init_hidden(self, batch_size, device=None):
         device = device or next(self.parameters()).device
-        num_dirs = 2 if self.bidirectional else 1
         return torch.zeros(
-            self.rnn_layers * num_dirs,
+            self.rnn_layers,
             batch_size,
             self.rnn_hidden,
             device=device,
