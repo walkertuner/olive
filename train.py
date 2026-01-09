@@ -128,7 +128,7 @@ def main():
                         else:
                             states.append(instr_state_table[iid])
                         unknown.append(drop)
-                        
+
                     instr_state = torch.cat(states, dim=0)  # (B, voicing_dim)
 
                     optimizer.zero_grad()
@@ -294,3 +294,6 @@ def plot_confusion_matrix(y_true, y_pred):
     image = np.array(PIL.Image.open(buf).convert('RGB'))
     image = image.transpose(2, 0, 1)
     return image
+
+if __name__ == "__main__":
+    main()

@@ -83,3 +83,6 @@ def main():
         with open(metadata_filename, "w") as meta_file:
             json.dump(metadata, meta_file, indent=2)
         print(f"[✓] Wrote {metadata_filename}")
+
+if __name__ == "__main__":
+    main()
