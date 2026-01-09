@@ -1,5 +1,5 @@
 import sys
-from olive import train, ingest
+from olive import train, ingest, summarize
 
 def main():
     if len(sys.argv) < 2:
@@ -13,6 +13,8 @@ def main():
         train.main()
     elif cmd == "ingest":
         ingest.main()
+    elif cmd == "summarize":
+        summarize.main()
     else:
         raise SystemExit(f"unknown command: {cmd}")
 
