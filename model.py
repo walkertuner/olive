@@ -236,7 +236,7 @@ class OLIVE(nn.Module):
             octave_logits
             pitch_logits
             partials
-            instr_delta
+            ctx
             h_next
         """
         B, Freq = frame.shape
@@ -251,7 +251,6 @@ class OLIVE(nn.Module):
             h = self.init_hidden_state(B, frame.device)
 
         rnn_out, h_next = self.rnn(emb, h)
-        h_next = h_next.detach()
         ctx = rnn_out[:, -1, :]             # (B, rnn_hidden)
 
         # ---- Note classification ----
@@ -277,6 +276,6 @@ class OLIVE(nn.Module):
         # ---- Partials ----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials, self.instr_update(ctx), h_next
+        return octave_logits, pitch_logits, partials, ctx, h_next.detach()
 
 
