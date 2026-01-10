@@ -18,7 +18,7 @@ class Sample(typing.NamedTuple):
     pitch: torch.Tensor
     partials: torch.Tensor
     mask: torch.Tensor
-    instr_id: int
+    instr_id: str
     stream_id: int
 
 class RealTimeNoiseFloor:
@@ -105,12 +105,6 @@ def build_feature_data(args):
     num_samples = 0
 
     for data in metadata:
-        # map instrument indicies
-        if data["instrument"] not in instruments:
-            instruments[data["instrument"]] = len(instruments)
-
-        instr_index = instruments[data["instrument"]]
-
         for i, sample_data in enumerate(data["samples"], start=1):
             if "file" not in sample_data:
                 continue
@@ -124,7 +118,7 @@ def build_feature_data(args):
                 flush=True,
             )
 
-            samples = extract_features(sample_data, instr_index, sample_index, cqt, noise_floor, args)
+            samples = extract_features(sample_data, data["instrument"], sample_index, cqt, noise_floor, args)
             
             feature_data.extend(samples)
 

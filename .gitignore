@@ -1,4 +1,16 @@
-.vscode
-__pycache__/
-*.pyc
+railsback.json
 
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Editor directories and files
+.vscode/

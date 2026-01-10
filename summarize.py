@@ -97,7 +97,8 @@ def main():
 
     print(f"Found {len(run_dirs)} folds\n")
 
-    mae_vals = []
+    mae_learned_vals = []
+    mae_prior_vals = []
     octave_vals = []
     pitch_vals = []
 
@@ -107,30 +108,35 @@ def main():
         # --- select epoch by MAE ---
         step = best_step(
             run,
-            tag="mae/partials_total",
+            tag="mae/partials_total/learned",
             mode="min",
         )
 
         # --- read all metrics at that same epoch ---
-        mae = value_at_step(run, "mae/partials_total", step)
-        octave = value_at_step(run, "accuracy/octave", step)
-        pitch = value_at_step(run, "accuracy/pitch", step)
+        mae_learned = value_at_step(run, "mae/partials_total/learned", step)
+        mae_prior = value_at_step(run, "mae/partials_total/prior", step)
+        octave = value_at_step(run, "accuracy/octave/learned", step)
+        pitch = value_at_step(run, "accuracy/pitch/learned", step)
 
-        mae_vals.append(mae)
+        mae_learned_vals.append(mae_learned)
+        mae_prior_vals.append(mae_prior)
         octave_vals.append(octave)
         pitch_vals.append(pitch)
 
         print(
             f"{fold:<20} "
             f"step={step:>6}  "
-            f"MAE={mae:.4f}  "
+            f"MAE_l={mae_learned:.4f}  "
+            f"MAE_p={mae_prior:.4f}  "
             f"oct={octave:.4f}  "
             f"pitch={pitch:.4f}"
         )
 
     print("\n--- Cross-validation summary ---\n")
 
-    summarize(mae_vals, "MAE (reference metric)")
+    summarize(mae_learned_vals, "MAE (reference metric)")
+    print()
+    summarize(mae_prior_vals, "MAE (prior)")
     print()
     summarize(octave_vals, "Octave accuracy")
     print()

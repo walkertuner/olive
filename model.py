@@ -14,7 +14,7 @@ class OLIVE(nn.Module):
 
     def __init__(
         self,
-        num_instr,
+        instr_ids,
         freq_bins=108,
         cnn_out=64,
         rnn_layers=1,
@@ -25,11 +25,12 @@ class OLIVE(nn.Module):
         num_octaves=8,
         num_pitches=12,
         num_partials=8,
-        alpha=0.01
+        alpha=0.1
     ):
         super().__init__()
 
-        self.num_instr = num_instr
+        self.instr_ids = instr_ids
+        self.instr_map = {s: i for i, s in enumerate(instr_ids)}
         self.freq_bins = freq_bins
         self.rnn_layers = rnn_layers
         self.rnn_hidden = rnn_hidden
@@ -72,8 +73,13 @@ class OLIVE(nn.Module):
 
         # ---------- Latent voicing heads ----------
         self.instr_prior = nn.Parameter(torch.zeros(voicing_dim))
-        self.instr_embedding = nn.Embedding(num_instr, voicing_dim)
-        self.instr_update = nn.Linear(rnn_hidden, voicing_dim)
+    
+        self.instr_embedding = nn.Embedding(len(instr_ids), voicing_dim)
+        #self.instr_embedding.weight.requires_grad_(False)
+        
+        #self.reset_instr_state()
+
+        self.instr_update = nn.Linear(rnn_hidden + voicing_dim, voicing_dim)
 
         self.voicing_instr_head = self._make_mlp(
             in_dim=rnn_hidden + voicing_dim,
@@ -138,30 +144,43 @@ class OLIVE(nn.Module):
 
         return torch.zeros(self.rnn_layers, B, self.rnn_hidden, device=device)
     
-    @torch.no_grad()
-    def init_instr_state(self, B, device=None, instr_id=None):
+    def get_instr_state(self, B, device=None, instr_idx=None):
         device = device or next(self.parameters()).device
 
-        if instr_id is None:
+        if instr_idx is None:
             state = self.instr_prior.unsqueeze(0).expand(B, -1)
         else:
-            if isinstance(instr_id, int):
-                idx = torch.tensor([instr_id], device=device)
+            if isinstance(instr_idx, int):
+                idx = torch.tensor([instr_idx], device=device)
                 state = self.instr_embedding(idx).expand(B, -1)
             else:
                 # instr_id is (B,) tensor
-                state = self.instr_embedding(instr_id.to(device))
+                state = self.instr_embedding(instr_idx.to(device))
+
+            #state = state.detach()
 
         return state
-
     
-    def update_instr_state(self, instr_state, delta):
+    @torch.no_grad()
+    def update_instr_state(self, instr_idx, delta):
         """
-        Update instr_state with accumulated evidence
+        EMA update to instrument state vector
         """
-        instr_state_next = (1 - self.alpha) * instr_state + self.alpha * delta
-        return instr_state_next.detach()
+        w = self.instr_embedding.weight[instr_idx]
+        new_value = (1 - self.alpha) * w + self.alpha * delta
+        self.instr_embedding.weight[instr_idx] = new_value
 
+    @torch.no_grad()
+    def reset_instr_state(self):
+        self.instr_embedding.weight.copy_(
+            self.instr_prior.unsqueeze(0).expand_as(self.instr_embedding.weight)
+        )
+
+    def instr_idx(self, instr_id):
+        return self.instr_map.get(instr_id)
+    
+    def instr_id(self, instr_idx):
+        return self.instr_ids[instr_idx]
 
     def forward(self, x, instr_state):
         return self.forward_sequence(x, instr_state)
@@ -179,7 +198,7 @@ class OLIVE(nn.Module):
             octave_logits
             pitch_logits
             partials
-            instr_state
+            instr_delta
         """
         B, T, Freq = sequence.shape
         assert Freq == self.freq_bins, f"Expected {self.freq_bins}, got {Freq}"
@@ -205,7 +224,7 @@ class OLIVE(nn.Module):
 
         # ----- Latent voicing -----
         if instr_state is None:
-            instr_state = self.init_instr_state(B, sequence.device)
+            instr_state = self.get_instr_state(B, sequence.device)
             
         instr_in = torch.cat([instr_state, ctx.detach()], dim=-1)
         voicing_instr = self.voicing_instr_head(instr_in)
@@ -215,12 +234,13 @@ class OLIVE(nn.Module):
 
         voicing = voicing_instr + voicing_note
 
-        instr_state = self.update_instr_state(instr_state, self.instr_update(ctx))
+        instr_update_in = torch.cat([instr_state, ctx.detach()], dim=-1)
+        instr_delta = self.instr_update(instr_update_in)
 
         # ----- All partials -----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials, instr_state
+        return octave_logits, pitch_logits, partials, instr_delta
 
     # ------------------------------------------------------------------
 
@@ -276,6 +296,6 @@ class OLIVE(nn.Module):
         # ---- Partials ----
         partials = self.partial_head(voicing)
 
-        return octave_logits, pitch_logits, partials, ctx, h_next.detach()
+        return octave_logits, pitch_logits, partials, ctx, h_next
 
 

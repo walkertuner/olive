@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "olive"
+version = "0.0.0"
+
+[tool.setuptools]
+packages = ["olive"]
+
+[tool.setuptools.package-dir]
+olive = "."

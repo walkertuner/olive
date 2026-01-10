@@ -1,5 +1,6 @@
 import argparse
 import json
+import glob
 import os
 import struct
 import sys
@@ -42,27 +43,39 @@ def parse_paz(filename):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train note classifier.")
 
-    parser.add_argument("--db", type=str, default="db", help="Path to database directory")
-    parser.add_argument("files", nargs="+", help="One or more input .paz files")
+    parser.add_argument("input", type=str, help="Input database directory")
+    parser.add_argument("--output", type=str, default="db", help="Output database directory")
 
     return parser.parse_args()
 
 def main():
     args = parse_args()
     
-    print(f"Output directory: {args.db}")
-    os.makedirs(args.db, exist_ok=True)
+    print(f"Output directory: {args.output}")
+    os.makedirs(args.output, exist_ok=True)
 
-    for input_path in args.files:
-        basename, extension = os.path.splitext(os.path.basename(input_path))
+    railsback_json = json.load(open(os.path.join(args.input, "railsback.json")))
+
+    railsback_map = {
+        k: v["railsbackId"]
+        for k, v in railsback_json.items()
+    }
+
+    for paz_file in glob.glob(os.path.join(args.input, "*.paz")):
+        basename, extension = os.path.splitext(os.path.basename(paz_file))
         instrument, pass_number = basename.split('_')
+        if instrument not in railsback_map:
+            print(f"Error: no railsbackId found for {instrument}")
+            continue
+        
+        instrument = railsback_map[instrument]
         pass_number = int(pass_number)-1
         
         metadata = {"instrument": instrument,
                     "pass":       pass_number,
-                    "samples":    parse_paz(input_path)}
+                    "samples":    parse_paz(paz_file)}
 
-        file_dir = os.path.join(args.db, instrument)
+        file_dir = os.path.join(args.output, instrument)
         os.makedirs(file_dir, exist_ok=True)
 
         for note, sample in enumerate(metadata["samples"]):
